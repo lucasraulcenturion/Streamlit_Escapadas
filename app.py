@@ -23,58 +23,104 @@ def safe_json_parse(raw_text: str):
     except:
         return {}
 
-def calcular_costo(response, nombre="Prompt"):
-    if not hasattr(response, "usage"):
-        return
-    in_tokens = response.usage.prompt_tokens
-    out_tokens = response.usage.completion_tokens
-    total_tokens = response.usage.total_tokens
-    in_price = in_tokens * 0.00000015
-    out_price = out_tokens * 0.0000006
-    st.sidebar.write(f"**{nombre}** → {total_tokens} tokens usados (${in_price+out_price:.6f} USD)")
-
 # =======================
 # Configuración de la app
 # =======================
-st.set_page_config(page_title="Mini ChatGPT Turístico", page_icon="✈️")
+st.set_page_config(page_title="Asistente de Escapadas", page_icon="✈️")
 st.title("✈️ Organizador de Escapadas IA")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Estado
+if "datos" not in st.session_state:
+    st.session_state.datos = {}
 if "itinerary" not in st.session_state:
     st.session_state.itinerary = None
 if "reservas" not in st.session_state:
     st.session_state.reservas = None
 
 # =======================
-# Chat interface
+# Paso 1 - Entrada de datos
 # =======================
-for msg in st.session_state.messages:
-    st.chat_message(msg["role"]).write(msg["content"])
+with st.form("datos_viaje"):
+    st.subheader("Completemos tu escapada paso a paso:")
 
-if prompt := st.chat_input("Escribí tu consulta o pedí un itinerario..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    st.chat_message("user").write(prompt)
+    destino = st.text_input("Destino del viaje", "")
+    transporte = st.selectbox("Medio de transporte", ["Auto", "Micro", "Avión", "Tren"])
+    personas = st.number_input("Cantidad de personas", min_value=1, max_value=20, value=2)
 
-    # Prompt A - Itinerario
-    if "itinerario" in prompt.lower():
-        system_msg = "Sos un organizador de escapadas. Generá itinerarios de viaje."
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.4
-        )
-        reply = response.choices[0].message.content
-        st.session_state.itinerary = reply
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        st.chat_message("assistant").write(reply)
-        calcular_costo(response, "Prompt A - Itinerario")
+    fecha_inicio = st.date_input("Fecha de inicio")
+    hora_llegada = st.time_input("Hora de llegada")
+    fecha_regreso = st.date_input("Fecha de regreso")
+    hora_regreso = st.time_input("Hora de regreso")
 
-    # Prompt C - Contactos simulados
-    elif "reservas" in prompt.lower() and st.session_state.itinerary:
+    presupuesto = st.selectbox("Presupuesto", ["Bajo", "Medio", "Medio-alto", "Alto"])
+    modo_viaje = st.selectbox("Modo de viaje", 
+        ["Exprímelo", "Relax", "Cultural", "Gastronómico", "Aventura", "Familiar"])
+
+    submit = st.form_submit_button("Generar Itinerario")
+
+# =======================
+# Generar Itinerario (Prompt A)
+# =======================
+if submit:
+    dt_inicio = datetime.combine(fecha_inicio, hora_llegada)
+    dt_regreso = datetime.combine(fecha_regreso, hora_regreso)
+    dias = (dt_regreso.date() - dt_inicio.date()).days + 1
+
+    st.session_state.datos = {
+        "dest": destino,
+        "transporte": transporte,
+        "dias": dias,
+        "pers": personas,
+        "presupuesto": presupuesto,
+        "modo": modo_viaje,
+        "fecha_inicio": str(fecha_inicio),
+        "hora_llegada": str(hora_llegada),
+        "fecha_regreso": str(fecha_regreso),
+        "hora_regreso": str(hora_regreso),
+    }
+
+    st.subheader("Resumen de tu viaje")
+    st.json(st.session_state.datos)
+
+    intake_prompt = f"""
+    Sos un organizador de viajes. Devolvé SOLO un itinerario detallado de {dias} días.
+
+    Datos del viaje:
+    {json.dumps(st.session_state.datos, indent=2, ensure_ascii=False)}
+
+    Formato esperado:
+    Día N - Zona
+    09:00-11:00 Actividad
+    11:15-13:00 Actividad
+    13:15-14:30 Almuerzo (2 opciones)
+    15:00-17:00 Actividad
+    17:15-19:00 Actividad
+    20:00 Cena (2 opciones)
+
+    Tené en cuenta:
+    - La hora de llegada del primer día (si es tarde, día reducido).
+    - La hora de regreso del último día (si es temprano, día reducido).
+    - Incluir traslados, resumen, tips y alertas QA.
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Sos un organizador de escapadas."},
+            {"role": "user", "content": intake_prompt}
+        ],
+        temperature=0.4
+    )
+
+    st.session_state.itinerary = response.choices[0].message.content
+    st.subheader("Itinerario generado")
+    st.text(st.session_state.itinerary)
+
+# =======================
+# Generar Reservas (Prompt C)
+# =======================
+if st.session_state.itinerary:
+    if st.button("Generar datos de contacto (Reservas)"):
         lugares = []
         for line in st.session_state.itinerary.splitlines():
             if any(p in line.lower() for p in ["hotel", "restaurante", "bodega", "excursión"]):
@@ -107,21 +153,9 @@ if prompt := st.chat_input("Escribí tu consulta o pedí un itinerario..."):
             ],
             temperature=0.3
         )
-        reply = response.choices[0].message.content
-        reservas_json = safe_json_parse(reply)
-        st.session_state.reservas = reservas_json
-        st.session_state.messages.append({"role": "assistant", "content": "Acá tenés los contactos simulados de los lugares detectados:"})
-        st.chat_message("assistant").write(reservas_json)
-        calcular_costo(response, "Prompt C - Contactos")
 
-    # Default: conversación genérica
-    else:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=st.session_state.messages,
-            temperature=0.6
-        )
-        reply = response.choices[0].message.content
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-        st.chat_message("assistant").write(reply)
-        calcular_costo(response, "Chat genérico")
+        reservas_json = safe_json_parse(response.choices[0].message.content)
+        st.session_state.reservas = reservas_json
+
+        st.subheader("Contactos simulados de reservas")
+        st.json(reservas_json)
