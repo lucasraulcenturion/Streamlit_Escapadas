@@ -1,11 +1,11 @@
 # app.py
 # ============================================
 # Organizador de Escapadas IA (Streamlit)
-# SOLO GEMINI (REST) para IMÁGENES + OpenAI para TEXTO
+# Texto: OpenAI · Imágenes: Gemini (REST)
 # ============================================
 
 import os, json, base64, requests
-from datetime import datetime
+from datetime import datetime, date, time as time_cls
 from io import BytesIO
 
 import streamlit as st
@@ -22,7 +22,7 @@ st.set_page_config(page_title="Organizador de Escapadas IA", page_icon="🧭", l
 # Modelos preconfigurados (sin UI)
 # =======================
 MODEL_TEXT = "gpt-4o-mini"
-MODEL_IMG  = "gemini-2.5-flash-image-preview"  # podés cambiar acá si querés forzar otro
+MODEL_IMG  = "gemini-2.5-flash-image-preview"   # Cambiar aquí si querés forzar otro
 
 # =======================
 # Helpers de claves
@@ -63,20 +63,6 @@ def safe_json_parse(raw_text: str):
         return json.loads(cleaned)
     except Exception:
         return {}
-
-def validar_fecha_ddmmyyyy(s: str) -> bool:
-    try:
-        datetime.strptime(s, "%d/%m/%Y")
-        return True
-    except ValueError:
-        return False
-
-def validar_hora_hhmm(s: str) -> bool:
-    try:
-        datetime.strptime(s, "%H:%M")
-        return True
-    except ValueError:
-        return False
 
 def _extraer_b64_de_respuesta(data: dict) -> str:
     """Busca la imagen base64 en la respuesta de Gemini."""
@@ -123,19 +109,37 @@ def generar_imagen_gemini(prompt: str, model_img: str, nombre_salida: str) -> tu
         pass
     return img_bytes, data
 
+def validar_fecha_ddmmyyyy(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%d/%m/%Y"); return True
+    except ValueError:
+        return False
+
+def validar_hora_hhmm(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%H:%M"); return True
+    except ValueError:
+        return False
+
 # =======================
 # UI principal
 # =======================
 st.title("🧭 Organizador de Escapadas IA")
 st.caption("Texto con OpenAI · Imágenes con Gemini (REST)")
 
-# Catálogos
 transportes = ["auto", "micro", "avión", "tren"]
 presupuestos = ["bajo", "medio", "medio-alto", "alto"]
 modos = ["Exprímelo", "Relax", "Cultural", "Gastronómico", "Aventura", "Familiar"]
 temporadas = ["alta", "baja"]
 
-# ---- Formulario sin valores precargados (solo placeholders) ----
+# Calendario y horas con defaults
+today = date.today()
+default_start = today
+default_end = date.fromordinal(today.toordinal() + 3)
+default_in_time = time_cls(10, 0)
+default_out_time = time_cls(22, 0)
+
+# ---- Formulario (sin precarga excepto fechas/horas) ----
 with st.form("form_viaje"):
     destino = st.text_input("Destino del viaje", value="", placeholder="Ej: Bariloche")
 
@@ -149,11 +153,11 @@ with st.form("form_viaje"):
 
     c4, c5 = st.columns(2)
     with c4:
-        fecha_inicio = st.text_input("Fecha de inicio (DD/MM/YYYY)", value="", placeholder="15/09/2025")
-        hora_llegada = st.text_input("Hora de llegada (HH:MM)", value="", placeholder="10:45")
+        fecha_inicio_date = st.date_input("Fecha de inicio", value=default_start, format="DD/MM/YYYY")
+        hora_llegada_time = st.time_input("Hora de llegada", value=default_in_time, step=300)
     with c5:
-        fecha_regreso = st.text_input("Fecha de regreso (DD/MM/YYYY)", value="", placeholder="21/09/2025")
-        hora_regreso = st.text_input("Hora de regreso (HH:MM)", value="", placeholder="22:00")
+        fecha_regreso_date = st.date_input("Fecha de regreso", value=default_end, format="DD/MM/YYYY")
+        hora_regreso_time = st.time_input("Hora de regreso", value=default_out_time, step=300)
 
     c6, c7 = st.columns(2)
     with c6:
@@ -166,48 +170,38 @@ with st.form("form_viaje"):
         ninos_menores_12 = st.selectbox("¿Hay niños menores de 12 años?", options=[True, False],
                                         index=None, placeholder="Elegí una opción",
                                         format_func=lambda b: "Sí" if b else "No")
-
     submitted = st.form_submit_button("🚀 Generar itinerario, QA e imágenes")
 
 # ---- Validación y ejecución ----
 if submitted:
-    # Validaciones básicas
+    # Validaciones
     errores = []
-    if not destino.strip():
-        errores.append("Ingresá un destino.")
-    if transporte is None:
-        errores.append("Seleccioná el medio de transporte.")
+    if not destino.strip(): errores.append("Ingresá un destino.")
+    if transporte is None: errores.append("Seleccioná el medio de transporte.")
     try:
         cant_personas = int(cant_personas_str)
         if cant_personas < 1: raise ValueError()
     except Exception:
         errores.append("Ingresá una **cantidad de personas** válida (entero ≥ 1).")
-    if temporada is None:
-        errores.append("Seleccioná la temporada.")
-    if not validar_fecha_ddmmyyyy(fecha_inicio):
-        errores.append("Fecha de inicio inválida (usa DD/MM/YYYY).")
-    if not validar_hora_hhmm(hora_llegada):
-        errores.append("Hora de llegada inválida (usa HH:MM).")
-    if not validar_fecha_ddmmyyyy(fecha_regreso):
-        errores.append("Fecha de regreso inválida (usa DD/MM/YYYY).")
-    if not validar_hora_hhmm(hora_regreso):
-        errores.append("Hora de regreso inválida (usa HH:MM).")
-    if presupuesto is None:
-        errores.append("Seleccioná el nivel de presupuesto.")
-    if modo_viaje is None:
-        errores.append("Seleccioná el modo de viaje.")
+    if temporada is None: errores.append("Seleccioná la temporada.")
+    if presupuesto is None: errores.append("Seleccioná el nivel de presupuesto.")
+    if modo_viaje is None: errores.append("Seleccioná el modo de viaje.")
     if modo_viaje == "Familiar" and ninos_menores_12 is None:
         errores.append("Indicá si viajan niños menores de 12 años.")
 
     if errores:
-        for e in errores:
-            st.error(e)
+        for e in errores: st.error(e)
         st.stop()
 
     if modo_viaje != "Familiar":
         ninos_menores_12 = False
 
-    # Construcción de datetimes
+    # Normalizo a string como usa el prompt
+    fecha_inicio = fecha_inicio_date.strftime("%d/%m/%Y")
+    fecha_regreso = fecha_regreso_date.strftime("%d/%m/%Y")
+    hora_llegada = hora_llegada_time.strftime("%H:%M")
+    hora_regreso = hora_regreso_time.strftime("%H:%M")
+
     dt_inicio = datetime.strptime(f"{fecha_inicio} {hora_llegada}", "%d/%m/%Y %H:%M")
     dt_regreso = datetime.strptime(f"{fecha_regreso} {hora_regreso}", "%d/%m/%Y %H:%M")
     if dt_regreso <= dt_inicio:
@@ -215,11 +209,8 @@ if submitted:
         st.stop()
 
     cant_dias = (dt_regreso.date() - dt_inicio.date()).days + 1
-    if cant_dias < 1:
-        st.error("La fecha de regreso debe ser posterior a la fecha de inicio.")
-        st.stop()
 
-    # Resumen (esto sí lo mostramos)
+    # Resumen final (visible)
     with st.expander("📌 Resumen de tu viaje", expanded=True):
         st.write(f"**Destino:** {destino}")
         st.write(f"**Transporte:** {transporte}")
@@ -232,8 +223,7 @@ if submitted:
         st.write(f"**Temporada:** {temporada.upper()}")
 
     # =======================
-    # Prompt A — Intake JSON (OpenAI TEXTO)
-    # (no se muestra al usuario)
+    # Intake JSON (NO visible)
     # =======================
     intake_prompt = f"""
 Sos un organizador de viajes.
@@ -266,11 +256,10 @@ JSON esperado:
             ],
             temperature=0.2
         )
-        raw_intake = intake_response.choices[0].message.content
-        intake_json = safe_json_parse(raw_intake)
+        intake_json = safe_json_parse(intake_response.choices[0].message.content)
 
     # =======================
-    # Itinerario (OpenAI TEXTO)
+    # Itinerario
     # =======================
     itinerario_prompt = f"""
 Usá este JSON:
@@ -325,7 +314,7 @@ Si no hay suficientes opciones locales, ampliá la variedad dentro del mismo des
                        mime="text/plain")
 
     # =======================
-    # QA — Auditoría (OpenAI TEXTO)
+    # QA — Auditoría
     # =======================
     qa_prompt = f"""
 Revisá el siguiente itinerario y generá un JSON con advertencias relevantes agrupadas por día.
@@ -339,9 +328,6 @@ Devolvé SOLO un JSON con este formato:
     "Día 2": [
       "Actividad X puede no ser apta para niños",
       "Traslado mayor a 60 minutos"
-    ],
-    "Día 5": [
-      "Actividad Y puede ser excesiva"
     ]
   }}
 }}
@@ -382,17 +368,8 @@ Reglas:
         st.info("Sin advertencias relevantes detectadas.")
 
     # =======================
-    # Generación de contactos simulados (sin mostrar lista de 'Lugares detectados')
+    # Contactos simulados (sin mostrar "lugares detectados")
     # =======================
-    # Se extraen puntos para los prompts y también se generan contactos directos a partir del texto.
-    puntos = []
-    for line in itinerario.splitlines():
-        if any(k in line.lower() for k in ["actividad","almuerzo","cena","tour","visita","excursión","paseo","mirador","sendero","reserva","playa","ballena","pingüino","ave"]):
-            t = line.strip()
-            if t and t not in puntos:
-                puntos.append(t)
-    lista_puntos = " | ".join(puntos[:8])
-
     prompt_contactos = f"""
 A partir del siguiente itinerario, generá datos de contacto **verosímiles** (no reales) para lugares y servicios mencionados.
 
@@ -437,26 +414,25 @@ Devolvé SOLO un JSON con:
                        mime="application/json")
 
     # =======================
-    # Prompts de imágenes (opcional ver)
+    # Prompts de imágenes (no se muestran)
+    #  - Mapa: SIN depender del itinerario. Solo paisajes/objetos del destino.
     # =======================
-    prompts_img = {
-        "Mapa": f"""
-Crear una ilustración 16:9 tipo mapa turístico vintage de {destino}, basada en el itinerario.
-Paleta cálida (beige, terracota, verdes suaves), textura de papel envejecido.
-Contorno simple/esquema del área y 4–6 mini-escenas derivadas de:
-{lista_puntos}
-Ilustración limpia, sin texto ni marcas de agua. Exportar PNG.
-""",
-        "Flyer": f"""
+    prompt_mapa = f"""
+Ilustración 16:9 tipo mapa turístico vintage de {destino}.
+- Base: silueta/contorno simple del área del destino con textura de papel antiguo.
+- Añadí 4–6 mini-escenas (viñetas) de **paisajes u objetos** característicos del destino
+  (montañas, lagos, costas, bosques, viñedos, fauna local, arquitectura típica, faros, artesanías
+  o comida regional). Evitá actividades, horarios o rutas.
+- Paleta cálida (beige, terracota, verdes suaves); líneas limpias y contraste claro.
+- **Sin texto, sin personas, sin logotipos ni marcas de agua.**
+- Composición clara y centrada. Exportá **una única imagen PNG** en 1920×1080.
+"""
+
+    prompt_flyer = f"""
 Crear un póster 16:9 estilo travel-poster de {destino}.
 Motivos icónicos del lugar {destino}.
-Exportar PNG.
-Colores vibrantes y contraste claro. Sin marcas de agua.
+Exportar PNG, colores vibrantes y contraste claro. Sin texto ni marcas de agua.
 """
-    }
-    with st.expander("🖼️ Ver prompts de imagen (opcional)"):
-        st.code(prompts_img["Mapa"].strip())
-        st.code(prompts_img["Flyer"].strip())
 
     # =======================
     # GEMINI REST — Imágenes
@@ -466,7 +442,7 @@ Colores vibrantes y contraste claro. Sin marcas de agua.
 
     with st.spinner("🗺️ Generando Mapa..."):
         nombre_mapa = f"{destino.replace(' ','_').lower()}_mapa.png"
-        bytes_mapa, raw_mapa = generar_imagen_gemini(prompts_img["Mapa"], MODEL_IMG, nombre_mapa)
+        bytes_mapa, raw_mapa = generar_imagen_gemini(prompt_mapa, MODEL_IMG, nombre_mapa)
     with cols[0]:
         if bytes_mapa:
             st.image(bytes_mapa, caption=nombre_mapa, use_container_width=True)
@@ -478,7 +454,7 @@ Colores vibrantes y contraste claro. Sin marcas de agua.
 
     with st.spinner("🎫 Generando Flyer..."):
         nombre_flyer = f"{destino.replace(' ','_').lower()}_flyer.png"
-        bytes_flyer, raw_flyer = generar_imagen_gemini(prompts_img["Flyer"], MODEL_IMG, nombre_flyer)
+        bytes_flyer, raw_flyer = generar_imagen_gemini(prompt_flyer, MODEL_IMG, nombre_flyer)
     with cols[1]:
         if bytes_flyer:
             st.image(bytes_flyer, caption=nombre_flyer, use_container_width=True)
