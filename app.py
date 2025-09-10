@@ -2,11 +2,10 @@
 # ============================================
 # Organizador de Escapadas IA (Streamlit)
 # SOLO GEMINI (REST) para IMÁGENES + OpenAI para TEXTO
-# Basado en tu script original (minimos cambios para UI)
 # ============================================
 
 import os, json, base64, requests
-from datetime import datetime, date, time as time_cls
+from datetime import datetime
 from io import BytesIO
 
 import streamlit as st
@@ -20,10 +19,15 @@ from openai import OpenAI
 st.set_page_config(page_title="Organizador de Escapadas IA", page_icon="🧭", layout="wide")
 
 # =======================
-# Utilidades de claves
+# Modelos preconfigurados (sin UI)
+# =======================
+MODEL_TEXT = "gpt-4o-mini"
+MODEL_IMG  = "gemini-2.5-flash-image-preview"  # podés cambiar acá si querés forzar otro
+
+# =======================
+# Helpers de claves
 # =======================
 def get_secret(key: str, default: str | None = None):
-    # Prioriza st.secrets si existe, luego variables de entorno (.env)
     try:
         if "secrets" in dir(st) and key in st.secrets:
             return st.secrets.get(key, default)
@@ -32,35 +36,23 @@ def get_secret(key: str, default: str | None = None):
     return os.getenv(key, default)
 
 # =======================
-# Estado global (costos)
-# =======================
-if "acumulado_tokens" not in st.session_state:
-    st.session_state.acumulado_tokens = 0
-if "acumulado_usd" not in st.session_state:
-    st.session_state.acumulado_usd = 0.0
-if "logs_costos" not in st.session_state:
-    st.session_state.logs_costos = []
-
-# =======================
-# Configuración API
+# Carga de entorno + clientes
 # =======================
 load_dotenv()
-
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
 
 if not OPENAI_API_KEY:
-    st.error("Falta **OPENAI_API_KEY**. Definilo en `.env` o en `st.secrets` para continuar.")
+    st.error("Falta **OPENAI_API_KEY**. Definilo en `.env` o en `st.secrets`.")
     st.stop()
 if not GOOGLE_API_KEY:
-    st.error("Falta **GOOGLE_API_KEY** (requerido para imágenes Gemini). Definilo en `.env` o en `st.secrets`.")
+    st.error("Falta **GOOGLE_API_KEY** (requerido para imágenes Gemini).")
     st.stop()
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL_IMG = get_secret("MODEL_IMG", "gemini-2.5-flash-image-preview")  # mismo default que tu código
 
 # =======================
-# Helpers
+# Utilidades
 # =======================
 def safe_json_parse(raw_text: str):
     cleaned = (raw_text or "").strip()
@@ -72,44 +64,22 @@ def safe_json_parse(raw_text: str):
     except Exception:
         return {}
 
-def _log_costo(linea: str):
-    st.session_state.logs_costos.append(linea)
+def validar_fecha_ddmmyyyy(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%d/%m/%Y")
+        return True
+    except ValueError:
+        return False
 
-def calcular_costo(response, nombre="Prompt"):
-    if not hasattr(response, "usage") or response.usage is None:
-        return
-    in_tokens = getattr(response.usage, "prompt_tokens", 0)
-    out_tokens = getattr(response.usage, "completion_tokens", 0)
-    total_tokens = getattr(response.usage, "total_tokens", in_tokens + out_tokens)
-
-    # Mantengo tus tarifas unitarias
-    in_price = in_tokens * 0.00000015
-    out_price = out_tokens * 0.0000006
-    costo_total = in_price + out_price
-
-    st.session_state.acumulado_tokens += total_tokens
-    st.session_state.acumulado_usd += costo_total
-    _log_costo(f"{nombre} → Tokens usados: {total_tokens}, USD {costo_total:.6f}")
-
-def calcular_costo_imagen(nombre="Imagen", costo_usd=0.039):
-    # Mantengo la función y permitir override por compatibilidad
-    st.session_state.acumulado_usd += costo_usd
-    _log_costo(f"{nombre} → Costo imagen: USD {costo_usd:.6f}")
-
-def guardar_resumen_tokens() -> str:
-    # Devuelve el contenido de resumen para descarga
-    lines = []
-    lines.extend(st.session_state.logs_costos)
-    lines.append("\n=== RESUMEN TOTAL ===")
-    lines.append(f"Tokens totales consumidos: {st.session_state.acumulado_tokens}")
-    lines.append(f"Costo total estimado: USD {st.session_state.acumulado_usd:.6f}")
-    return "\n".join(lines)
+def validar_hora_hhmm(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%H:%M")
+        return True
+    except ValueError:
+        return False
 
 def _extraer_b64_de_respuesta(data: dict) -> str:
-    """
-    Estructura oficial: candidates[0].content.parts[].inline_data.data (base64)
-    + Fallbacks por cambios menores de esquema.
-    """
+    """Busca la imagen base64 en la respuesta de Gemini."""
     try:
         for cand in data.get("candidates", []):
             content = cand.get("content", {})
@@ -117,7 +87,6 @@ def _extraer_b64_de_respuesta(data: dict) -> str:
                 inline = part.get("inline_data") or part.get("inlineData")
                 if isinstance(inline, dict) and "data" in inline:
                     return inline["data"]
-            # Fallbacks opcionales
             if "image" in cand and isinstance(cand["image"], dict) and "bytesBase64" in cand["image"]:
                 return cand["image"]["bytesBase64"]
             for m in cand.get("media", []):
@@ -128,10 +97,7 @@ def _extraer_b64_de_respuesta(data: dict) -> str:
         pass
     return ""
 
-def generar_imagen_gemini(prompt: str, model_img: str, nombre_salida: str, costo_estimado=0.00) -> tuple[bytes | None, dict]:
-    """
-    Llama a Gemini REST y devuelve (bytes_png, raw_json_respuesta)
-    """
+def generar_imagen_gemini(prompt: str, model_img: str, nombre_salida: str) -> tuple[bytes | None, dict]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_img}:generateContent"
     headers = {"x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json"}
     body = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -139,7 +105,6 @@ def generar_imagen_gemini(prompt: str, model_img: str, nombre_salida: str, costo
     try:
         r.raise_for_status()
     except Exception:
-        # Trata de leer json del error
         try:
             return None, r.json()
         except Exception:
@@ -151,119 +116,98 @@ def generar_imagen_gemini(prompt: str, model_img: str, nombre_salida: str, costo
         return None, data
 
     img_bytes = base64.b64decode(b64_img)
-    # Guardar en archivo por compatibilidad con tu flujo
     try:
         with open(nombre_salida, "wb") as f:
             f.write(img_bytes)
     except Exception:
         pass
-    # Costos (mantengo tu preferencia por costo 0.00 si querés)
-    calcular_costo_imagen(f"Imagen {nombre_salida} (Gemini)", costo_usd=costo_estimado)
     return img_bytes, data
 
 # =======================
-# Encabezado
+# UI principal
 # =======================
 st.title("🧭 Organizador de Escapadas IA")
 st.caption("Texto con OpenAI · Imágenes con Gemini (REST)")
 
-# =======================
-# Sidebar (config avanzada)
-# =======================
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    model_text = st.text_input("Modelo de texto (OpenAI):", value="gpt-4o-mini")
-    model_img = st.text_input("Modelo de imagen (Gemini):", value=MODEL_IMG, help="Ej: gemini-2.5-flash-image-preview o imagen-3.0-generate-001")
-    costo_img = st.number_input("Costo estimado por imagen (USD)", min_value=0.00, max_value=1.0, step=0.001, value=0.00, help="Mantengo 0.00 como en tu script. Cambiá si querés estimar costo real.")
-    if st.button("♻️ Reiniciar contadores de costo"):
-        st.session_state.acumulado_tokens = 0
-        st.session_state.acumulado_usd = 0.0
-        st.session_state.logs_costos = []
-        st.success("Contadores reiniciados.")
+# Catálogos
+transportes = ["auto", "micro", "avión", "tren"]
+presupuestos = ["bajo", "medio", "medio-alto", "alto"]
+modos = ["Exprímelo", "Relax", "Cultural", "Gastronómico", "Aventura", "Familiar"]
+temporadas = ["alta", "baja"]
 
-# =======================
-# Formulario de entrada
-# =======================
-st.subheader("🧾 Datos del viaje")
-
-transportes_map = {1: "auto", 2: "micro", 3: "avión", 4: "tren"}
-presupuestos_map = {1: "bajo", 2: "medio", 3: "medio-alto", 4: "alto"}
-modos_map = {
-    1: ("Exprímelo", "Aprovechar al máximo cada hora."),
-    2: ("Relax", "Ritmo tranquilo, descansos largos."),
-    3: ("Cultural", "Museos, historia, arquitectura."),
-    4: ("Gastronómico", "Comidas y vinos locales."),
-    5: ("Aventura", "Deportes y excursiones."),
-    6: ("Familiar", "Opciones aptas para todas las edades.")
-}
-
-today = date.today()
-default_start = today
-default_end = date.fromordinal(today.toordinal() + 3)
-
+# ---- Formulario sin valores precargados (solo placeholders) ----
 with st.form("form_viaje"):
-    destino = st.text_input("Destino del viaje (texto libre):", value="Mendoza")
+    destino = st.text_input("Destino del viaje", value="", placeholder="Ej: Bariloche")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        transporte_idx = st.selectbox("Medio de transporte:", options=list(transportes_map.keys()),
-                                      format_func=lambda k: transportes_map[k].capitalize(), index=2)
-    with col2:
-        cant_personas = st.number_input("Cantidad de personas:", min_value=1, value=2, step=1)
-    with col3:
-        temporada = st.radio("Temporada:", options=["alta", "baja"], horizontal=True, index=0)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        transporte = st.selectbox("Medio de transporte", options=transportes, index=None, placeholder="Elegí un medio")
+    with c2:
+        cant_personas_str = st.text_input("Cantidad de personas", value="", placeholder="Ej: 2")
+    with c3:
+        temporada = st.selectbox("Temporada", options=temporadas, index=None, placeholder="Elegí temporada")
 
-    col4, col5 = st.columns(2)
-    with col4:
-        fecha_inicio_date = st.date_input("Fecha de inicio:", value=default_start, format="DD/MM/YYYY")
-        hora_llegada_time = st.time_input("Hora de llegada:", value=time_cls(10, 0), step=300)
-    with col5:
-        fecha_regreso_date = st.date_input("Fecha de regreso:", value=default_end, format="DD/MM/YYYY")
-        hora_regreso_time = st.time_input("Hora de regreso:", value=time_cls(22, 0), step=300)
+    c4, c5 = st.columns(2)
+    with c4:
+        fecha_inicio = st.text_input("Fecha de inicio (DD/MM/YYYY)", value="", placeholder="15/09/2025")
+        hora_llegada = st.text_input("Hora de llegada (HH:MM)", value="", placeholder="10:45")
+    with c5:
+        fecha_regreso = st.text_input("Fecha de regreso (DD/MM/YYYY)", value="", placeholder="21/09/2025")
+        hora_regreso = st.text_input("Hora de regreso (HH:MM)", value="", placeholder="22:00")
 
-    col6, col7 = st.columns(2)
-    with col6:
-        presupuesto_idx = st.selectbox(
-            "Nivel de presupuesto:",
-            options=list(presupuestos_map.keys()),
-            format_func=lambda k: {
-                1: "Bajo → Económico, transporte público, hostels.",
-                2: "Medio → Balance costo/comodidad.",
-                3: "Medio-alto → Hoteles 3-4⭐, experiencias destacadas.",
-                4: "Alto → Lujo, experiencias premium."
-            }[k],
-            index=2
-        )
-    with col7:
-        modo_idx = st.selectbox(
-            "Modo de viaje:",
-            options=list(modos_map.keys()),
-            format_func=lambda k: f"{modos_map[k][0]} → {modos_map[k][1]}",
-            index=1
-        )
+    c6, c7 = st.columns(2)
+    with c6:
+        presupuesto = st.selectbox("Nivel de presupuesto", options=presupuestos, index=None, placeholder="Elegí presupuesto")
+    with c7:
+        modo_viaje = st.selectbox("Modo de viaje", options=modos, index=None, placeholder="Elegí modo")
 
-    ninos_menores_12 = False
-    if modos_map[modo_idx][0] == "Familiar":
-        ninos_menores_12 = st.radio("¿Hay niños menores de 12 años?", options=[True, False],
-                                    format_func=lambda b: "Sí" if b else "No", horizontal=True, index=0)
+    ninos_menores_12 = None
+    if modo_viaje == "Familiar":
+        ninos_menores_12 = st.selectbox("¿Hay niños menores de 12 años?", options=[True, False],
+                                        index=None, placeholder="Elegí una opción",
+                                        format_func=lambda b: "Sí" if b else "No")
 
     submitted = st.form_submit_button("🚀 Generar itinerario, QA e imágenes")
 
-# =======================
-# Validación y ejecución
-# =======================
+# ---- Validación y ejecución ----
 if submitted:
-    # Normalizo strings requeridos por tu prompt
-    transporte = transportes_map[transporte_idx]
-    presupuesto = presupuestos_map[presupuesto_idx]
-    modo_viaje = modos_map[modo_idx][0]
+    # Validaciones básicas
+    errores = []
+    if not destino.strip():
+        errores.append("Ingresá un destino.")
+    if transporte is None:
+        errores.append("Seleccioná el medio de transporte.")
+    try:
+        cant_personas = int(cant_personas_str)
+        if cant_personas < 1: raise ValueError()
+    except Exception:
+        errores.append("Ingresá una **cantidad de personas** válida (entero ≥ 1).")
+    if temporada is None:
+        errores.append("Seleccioná la temporada.")
+    if not validar_fecha_ddmmyyyy(fecha_inicio):
+        errores.append("Fecha de inicio inválida (usa DD/MM/YYYY).")
+    if not validar_hora_hhmm(hora_llegada):
+        errores.append("Hora de llegada inválida (usa HH:MM).")
+    if not validar_fecha_ddmmyyyy(fecha_regreso):
+        errores.append("Fecha de regreso inválida (usa DD/MM/YYYY).")
+    if not validar_hora_hhmm(hora_regreso):
+        errores.append("Hora de regreso inválida (usa HH:MM).")
+    if presupuesto is None:
+        errores.append("Seleccioná el nivel de presupuesto.")
+    if modo_viaje is None:
+        errores.append("Seleccioná el modo de viaje.")
+    if modo_viaje == "Familiar" and ninos_menores_12 is None:
+        errores.append("Indicá si viajan niños menores de 12 años.")
 
-    # Formatos de fecha/hora como en tu script
-    fecha_inicio = fecha_inicio_date.strftime("%d/%m/%Y")
-    hora_llegada = hora_llegada_time.strftime("%H:%M")
-    fecha_regreso = fecha_regreso_date.strftime("%d/%m/%Y")
-    hora_regreso = hora_regreso_time.strftime("%H:%M")
+    if errores:
+        for e in errores:
+            st.error(e)
+        st.stop()
 
+    if modo_viaje != "Familiar":
+        ninos_menores_12 = False
+
+    # Construcción de datetimes
     dt_inicio = datetime.strptime(f"{fecha_inicio} {hora_llegada}", "%d/%m/%Y %H:%M")
     dt_regreso = datetime.strptime(f"{fecha_regreso} {hora_regreso}", "%d/%m/%Y %H:%M")
     if dt_regreso <= dt_inicio:
@@ -275,7 +219,7 @@ if submitted:
         st.error("La fecha de regreso debe ser posterior a la fecha de inicio.")
         st.stop()
 
-    # Resumen
+    # Resumen (esto sí lo mostramos)
     with st.expander("📌 Resumen de tu viaje", expanded=True):
         st.write(f"**Destino:** {destino}")
         st.write(f"**Transporte:** {transporte}")
@@ -289,6 +233,7 @@ if submitted:
 
     # =======================
     # Prompt A — Intake JSON (OpenAI TEXTO)
+    # (no se muestra al usuario)
     # =======================
     intake_prompt = f"""
 Sos un organizador de viajes.
@@ -312,20 +257,17 @@ JSON esperado:
   }}
 }}
 """
-    with st.spinner("🧩 Generando Intake JSON..."):
+    with st.spinner("🧩 Preparando parámetros..."):
         intake_response = openai_client.chat.completions.create(
-            model=model_text,
+            model=MODEL_TEXT,
             messages=[
                 {"role": "system", "content": "Respondé SOLO con JSON válido y breve."},
                 {"role": "user", "content": intake_prompt}
             ],
             temperature=0.2
         )
-        calcular_costo(intake_response, "Prompt A - Intake")
         raw_intake = intake_response.choices[0].message.content
         intake_json = safe_json_parse(raw_intake)
-    st.subheader("Intake JSON")
-    st.json(intake_json)
 
     # =======================
     # Itinerario (OpenAI TEXTO)
@@ -366,20 +308,21 @@ Si no hay suficientes opciones locales, ampliá la variedad dentro del mismo des
 """
     with st.spinner("🗺️ Generando Itinerario..."):
         itinerario_response = openai_client.chat.completions.create(
-            model=model_text,
+            model=MODEL_TEXT,
             messages=[
                 {"role": "system", "content": "Devolvé solo itinerario en texto limpio."},
                 {"role": "user", "content": itinerario_prompt}
             ],
             temperature=0.4
         )
-        calcular_costo(itinerario_response, "Prompt A - Itinerario")
         itinerario = itinerario_response.choices[0].message.content
 
     st.subheader("Itinerario generado")
     st.text(itinerario)
-    st.download_button("💾 Descargar itinerario (TXT)", data=itinerario.encode("utf-8"),
-                       file_name="itinerario_final.txt", mime="text/plain")
+    st.download_button("💾 Descargar itinerario (TXT)",
+                       data=itinerario.encode("utf-8"),
+                       file_name="itinerario_final.txt",
+                       mime="text/plain")
 
     # =======================
     # QA — Auditoría (OpenAI TEXTO)
@@ -415,14 +358,13 @@ Reglas:
 """
     with st.spinner("🔎 Auditando Itinerario..."):
         qa_response = openai_client.chat.completions.create(
-            model=model_text,
+            model=MODEL_TEXT,
             messages=[
                 {"role": "system", "content": "Actuá como auditor de itinerarios. Respondé SOLO con JSON válido."},
                 {"role": "user", "content": qa_prompt}
             ],
             temperature=0.2
         )
-        calcular_costo(qa_response, "Prompt QA - Auditoría")
         qa_json = safe_json_parse(qa_response.choices[0].message.content)
 
     st.subheader("QA del itinerario")
@@ -440,38 +382,22 @@ Reglas:
         st.info("Sin advertencias relevantes detectadas.")
 
     # =======================
-    # Extracción de lugares (desde itinerario)
+    # Generación de contactos simulados (sin mostrar lista de 'Lugares detectados')
     # =======================
-    lugares = []
-    palabras_clave = [
-        "hotel","restaurante","bodega","actividad","excursión","remis","taxi",
-        "auto de alquiler","transfer","museo","café","bar","parque","mercado",
-        "zoológico","plaza","mirador","sendero","playa","río","laguna","reserva","centro"
-    ]
+    # Se extraen puntos para los prompts y también se generan contactos directos a partir del texto.
+    puntos = []
     for line in itinerario.splitlines():
-        texto = line.strip()
-        if not texto:
-            continue
-        if any(palabra in texto.lower() for palabra in palabras_clave):
-            lugares.append(texto)
-        elif any(w.istitle() for w in texto.split()):
-            lugares.append(texto)
+        if any(k in line.lower() for k in ["actividad","almuerzo","cena","tour","visita","excursión","paseo","mirador","sendero","reserva","playa","ballena","pingüino","ave"]):
+            t = line.strip()
+            if t and t not in puntos:
+                puntos.append(t)
+    lista_puntos = " | ".join(puntos[:8])
 
-    st.subheader("Lugares y servicios detectados")
-    st.write(lugares if lugares else "—")
-    st.download_button("💾 Descargar lugares (JSON)",
-                       data=json.dumps(lugares, indent=2, ensure_ascii=False).encode("utf-8"),
-                       file_name="lugares.json", mime="application/json")
-
-    # =======================
-    # Contactos simulados (OpenAI TEXTO)
-    # =======================
     prompt_contactos = f"""
-A partir de esta lista de lugares:
+A partir del siguiente itinerario, generá datos de contacto **verosímiles** (no reales) para lugares y servicios mencionados.
 
-{json.dumps(lugares, indent=2, ensure_ascii=False)}
-
-Simulá datos de contacto realistas.
+Itinerario:
+{itinerario}
 
 Devolvé SOLO un JSON con:
 [
@@ -486,14 +412,13 @@ Devolvé SOLO un JSON con:
 """
     with st.spinner("📇 Generando contactos simulados..."):
         contactos_response = openai_client.chat.completions.create(
-            model=model_text,
+            model=MODEL_TEXT,
             messages=[
                 {"role": "system", "content": "Respondé SOLO con JSON válido."},
                 {"role": "user", "content": prompt_contactos}
             ],
             temperature=0.4
         )
-        calcular_costo(contactos_response, "Prompt C - Contactos")
         contactos_json = safe_json_parse(contactos_response.choices[0].message.content)
 
     st.subheader("Lugares/Servicios con datos de contacto simulados")
@@ -506,24 +431,14 @@ Devolvé SOLO un JSON con:
             st.json(contactos_json)
     else:
         st.info("No se generaron contactos.")
-
     st.download_button("💾 Descargar contactos (JSON)",
                        data=json.dumps(contactos_json, indent=2, ensure_ascii=False).encode("utf-8"),
-                       file_name="contactos.json", mime="application/json")
+                       file_name="contactos.json",
+                       mime="application/json")
 
     # =======================
-    # Preparar puntos clave → prompts de imágenes
+    # Prompts de imágenes (opcional ver)
     # =======================
-    puntos = []
-    for line in itinerario.splitlines():
-        if any(k in line.lower() for k in ["actividad","almuerzo","cena","tour","visita","excursión","paseo","mirador","sendero","reserva","playa","ballena","pingüino","ave"]):
-            puntos.append(line.strip())
-    puntos_unicos = []
-    for p in puntos:
-        if p not in puntos_unicos:
-            puntos_unicos.append(p)
-    lista_puntos = " | ".join(puntos_unicos[:8])  # limitar como tu script
-
     prompts_img = {
         "Mapa": f"""
 Crear una ilustración 16:9 tipo mapa turístico vintage de {destino}, basada en el itinerario.
@@ -539,21 +454,19 @@ Exportar PNG.
 Colores vibrantes y contraste claro. Sin marcas de agua.
 """
     }
-
-    with st.expander("🖼️ Prompts de imagen generados"):
-        st.code(prompts_img["Mapa"].strip(), language="markdown")
-        st.code(prompts_img["Flyer"].strip(), language="markdown")
+    with st.expander("🖼️ Ver prompts de imagen (opcional)"):
+        st.code(prompts_img["Mapa"].strip())
+        st.code(prompts_img["Flyer"].strip())
 
     # =======================
-    # GEMINI REST — Generación de imágenes
+    # GEMINI REST — Imágenes
     # =======================
     st.subheader("Imágenes (Gemini REST)")
     cols = st.columns(2)
 
-    with st.spinner("🗺️ Generando Mapa con Gemini..."):
+    with st.spinner("🗺️ Generando Mapa..."):
         nombre_mapa = f"{destino.replace(' ','_').lower()}_mapa.png"
-        bytes_mapa, raw_mapa = generar_imagen_gemini(prompts_img["Mapa"], model_img, nombre_mapa, costo_estimado=costo_img)
-
+        bytes_mapa, raw_mapa = generar_imagen_gemini(prompts_img["Mapa"], MODEL_IMG, nombre_mapa)
     with cols[0]:
         if bytes_mapa:
             st.image(bytes_mapa, caption=nombre_mapa, use_container_width=True)
@@ -563,10 +476,9 @@ Colores vibrantes y contraste claro. Sin marcas de agua.
             with st.expander("Ver respuesta cruda (Mapa)"):
                 st.json(raw_mapa)
 
-    with st.spinner("🎫 Generando Flyer con Gemini..."):
+    with st.spinner("🎫 Generando Flyer..."):
         nombre_flyer = f"{destino.replace(' ','_').lower()}_flyer.png"
-        bytes_flyer, raw_flyer = generar_imagen_gemini(prompts_img["Flyer"], model_img, nombre_flyer, costo_estimado=costo_img)
-
+        bytes_flyer, raw_flyer = generar_imagen_gemini(prompts_img["Flyer"], MODEL_IMG, nombre_flyer)
     with cols[1]:
         if bytes_flyer:
             st.image(bytes_flyer, caption=nombre_flyer, use_container_width=True)
@@ -575,14 +487,5 @@ Colores vibrantes y contraste claro. Sin marcas de agua.
             st.warning("No se detectó imagen en la respuesta del modelo para el **Flyer**.")
             with st.expander("Ver respuesta cruda (Flyer)"):
                 st.json(raw_flyer)
-
-    # =======================
-    # Costos totales
-    # =======================
-    st.subheader("💸 Costos estimados")
-    resumen = guardar_resumen_tokens()
-    st.text(resumen)
-    st.download_button("💾 Descargar costos_totales.txt", data=resumen.encode("utf-8"),
-                       file_name="costos_totales.txt", mime="text/plain")
 
 # Fin
